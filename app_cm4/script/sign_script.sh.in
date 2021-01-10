@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# This file is used by CMake to create the build commands to sign an OTA image
+#
+# Modify at your peril !
+#
+# The @ VAR @ values are substituted when CMake is run.
+# The output file will be in the same directory as the .elf, .hex, etc files
+
+set -e
+
+echo ""
+echo  "@IMGTOOL_SCRIPT_COMMAND@ Hex, creating bin."
+ 
+#
+# If this app is being built for OTA (and using MCUBoot)
+cd @MCUBOOT_SCRIPT_FILE_DIR@
+
+# set Python executable based on Host OS
+PYTHON_PATH=python3
+if [[ "$OS" = "Windows_NT" ]]
+then
+    PYTHON_PATH=python
+fi
+
+# Make a copy of input file.
+CY_OUTPUT_WIFI_FW_BLOB_PAD=@CY_OUTPUT_WIFI_FW_BLOB@.input.tmp.bin
+cp @CY_INPUT_WIFI_FW_BLOB@ $CY_OUTPUT_WIFI_FW_BLOB_PAD
+
+# Now, pad the Wi-Fi Fimrware Blob.
+dd if=/dev/zero bs=1 count=@CY_PAD_BYTES@ >> $CY_OUTPUT_WIFI_FW_BLOB_PAD
+
+# Combine CLM & Wi-Fi firmware blobs to a temporary file.
+CY_OUTPUT_WIFI_FW_BLOB_TMP=@CY_OUTPUT_WIFI_FW_BLOB@.tmp.bin
+cat $CY_OUTPUT_WIFI_FW_BLOB_PAD @CY_OUTPUT_WIFI_CLM_BLOB_BIN@ > $CY_OUTPUT_WIFI_FW_BLOB_TMP
+
+# Signing application firmware.
+$PYTHON_PATH @IMGTOOL_SCRIPT_NAME@ @IMGTOOL_SCRIPT_COMMAND@ @FLASH_ERASE_VALUE@ -e little --align 8 -H @MCUBOOT_HEADER_SIZE@ --pad-header -M @MCUBOOT_MAX_IMG_SECTORS@ -v @CY_BUILD_VERSION@ -L @CY_BOOT_PRIMARY_1_START@ -S @CY_BOOT_PRIMARY_1_SIZE@ @CY_SIGNING_KEY_ARG@ @CY_OUTPUT_FILE_PATH_UNSIGNED_HEX@ @CY_OUTPUT_FILE_PATH_HEX@
+
+# Signing Wi-Fi blob.
+$PYTHON_PATH @IMGTOOL_SCRIPT_NAME@ @IMGTOOL_SCRIPT_COMMAND@ @FLASH_ERASE_VALUE@ -e little --pad-header --align 8 -H @MCUBOOT_HEADER_SIZE@ -M @MCUBOOT_MAX_IMG_SECTORS@ -v @CY_WIFI_FW_BLOB_VERSION@ -S @CY_BOOT_PRIMARY_2_SIZE@ @CY_SIGNING_KEY_ARG@ $CY_OUTPUT_WIFI_FW_BLOB_TMP @CY_OUTPUT_WIFI_FW_BLOB@
+
+# Remove the temp file. 
+rm $CY_OUTPUT_WIFI_FW_BLOB_TMP
+rm $CY_OUTPUT_WIFI_FW_BLOB_PAD
+
+# back to our build directory
+cd @CMAKE_BINARY_DIR@
+
+# Convert signed hex file to binary for AWS uploading
+"@GCC_OBJCOPY@" --input-target=ihex --output-target=binary @CY_OUTPUT_FILE_PATH_HEX@ @CY_OUTPUT_FILE_PATH_BIN@
+echo  " Done."
+
+# get size of binary files for components.json
+if [[ @CY_INC_MAIN_APP_IN_TAR@ -eq 1 ]]
+then
+    BIN_SIZE=$(ls -g -o "@CY_OUTPUT_FILE_NAME_BIN@" | awk '{printf $3}')
+fi
+
+if [[ @CY_INC_WIFI_BLOB_IN_TAR@ -eq 1 ]]
+then
+    WIFI_BLOB_BIN_SIZE=$(ls -g -o "@CY_OUTPUT_WIFI_FW_BLOB@" | awk '{printf $3}')
+fi
+# Create component .json.
+# Note: we don't create a tar file when none of the following conditions are met.
+if [[ @CY_INC_MAIN_APP_IN_TAR@ -eq 1 ]] && [[ @CY_INC_WIFI_BLOB_IN_TAR@ -eq 1 ]]
+then
+    echo "{\"numberOfComponents\":\"3\",\"version\":\"@CY_BUILD_VERSION@\",\"files\":["                             >  @CY_COMPONENTS_JSON_NAME@
+    echo "{\"fileName\":\"components.json\",\"fileType\": \"component_list\"},"                                     >> @CY_COMPONENTS_JSON_NAME@
+    echo "{\"fileName\":\"@CY_OUTPUT_FILE_NAME_BIN@\",\"fileType\": \"NSPE\",\"fileSize\":\"$BIN_SIZE\"},"          >> @CY_COMPONENTS_JSON_NAME@
+    echo "{\"fileName\":\"@CY_WIFI_BLOB_NAME_BIN@\",\"fileType\": \"SPE\",\"fileSize\":\"$WIFI_BLOB_BIN_SIZE\"}]}"  >> @CY_COMPONENTS_JSON_NAME@
+    tar -cvf @CY_OUTPUT_FILE_NAME_TAR@ @CY_COMPONENTS_JSON_NAME@ @CY_OUTPUT_FILE_NAME_BIN@ @CY_WIFI_BLOB_NAME_BIN@
+elif [[ @CY_INC_MAIN_APP_IN_TAR@ -eq 1 ]] && [[ @CY_INC_WIFI_BLOB_IN_TAR@ -eq 0 ]]
+then
+    echo "{\"numberOfComponents\":\"2\",\"version\":\"@CY_BUILD_VERSION@\",\"files\":["                             >  @CY_COMPONENTS_JSON_NAME@
+    echo "{\"fileName\":\"components.json\",\"fileType\": \"component_list\"},"                                     >> @CY_COMPONENTS_JSON_NAME@
+    echo "{\"fileName\":\"@CY_OUTPUT_FILE_NAME_BIN@\",\"fileType\": \"NSPE\",\"fileSize\":\"$BIN_SIZE@\"}]}"        >> @CY_COMPONENTS_JSON_NAME@
+    tar -cvf @CY_OUTPUT_FILE_NAME_TAR@ @CY_COMPONENTS_JSON_NAME@ @CY_OUTPUT_FILE_NAME_BIN@
+fi
+
+echo ""
+echo "Application Name                         : @AFR_TARGET_APP_NAME@"
+echo "                                         : @CY_WIFI_BLOB_NAME_BIN@"
+echo "Primary 1 Slot Start                     : @CY_BOOT_PRIMARY_1_START@"
+echo "Secondary 1 Slot Start                   : @CY_BOOT_SECONDARY_1_START@"
+echo "Primary 2 Slot Start                     : @CY_BOOT_PRIMARY_2_START@"
+echo "Secondary 2 Slot Start                   : @CY_BOOT_SECONDARY_2_START@"
+echo "Primary 1 Slot Size                      : @CY_BOOT_PRIMARY_1_SIZE@"
+echo "Primary 2 Slot Size                      : @CY_BOOT_PRIMARY_2_SIZE@"
+echo "FLASH ERASE Value (NOTE: Empty for 0xff) : @FLASH_ERASE_VALUE@"
+echo "Cypress MCUBoot Header size              : @MCUBOOT_HEADER_SIZE@"
+echo "Max 512 bytes sectors for Application    : @MCUBOOT_MAX_IMG_SECTORS@"
+if [ "@SIGNING_KEY_PATH@" != "" ]
+then
+    echo "Signing key: @SIGNING_KEY_PATH@"
+fi
+echo ""
+
+#
+ls -l @CY_OUTPUT_FILE_PATH_WILD@
+ls -l @CY_OUTPUT_WIFI_FW_BLOB@
+
+echo ""
+if [[ @CY_INC_MAIN_APP_IN_TAR@ -eq 1 ]]
+then
+    echo "@CY_OUTPUT_FILE_NAME_TAR@ File List"
+    # print tar file list
+    tar -t -f @CY_OUTPUT_FILE_NAME_TAR@
+fi
+
+echo ""
